@@ -91,6 +91,7 @@ struct server_slot {
     bool has_next_token = true;
     bool has_new_line   = false;
     bool truncated      = false;
+    bool checkpoint_restored = false;
 
     stop_type stop;
 
@@ -2367,10 +2368,10 @@ private:
                                         if (n != checkpoint_size) {
                                             SLT_ERR(slot, "failed to restore context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, (float) checkpoint_size / 1024 / 1024);
                                             do_reset = true;
-                                            //printf("[DEBUG] `do_reset` was set to `true` after failing to restore a checkpoint");
                                         } else {
                                             pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                             n_past = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
+                                            slot.checkpoint_restored = true;
                                             SLT_WRN(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, (float) checkpoint_size / 1024 / 1024);
                                         }
                                     }
@@ -2430,13 +2431,20 @@ private:
                     SLT_INF(slot, "n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
                     if (!llama_memory_seq_rm(llama_get_memory(ctx), slot.id, p0, -1)) {
-                        SLT_WRN(slot, "failed to truncate tokens with position >= %d - clearing the memory\n", p0);
+                        if (slot.checkpoint_restored) {
+                            // checkpoint was just restored - the memory state is already correct
+                            // seq_rm fails for recurrent/hybrid models but the restored state is valid
+                            SLT_INF(slot, "seq_rm failed after checkpoint restore (expected for recurrent models) - continuing with restored state\n");
+                        } else {
+                            SLT_WRN(slot, "failed to truncate tokens with position >= %d - clearing the memory\n", p0);
 
-                        slot.prompt_clear(true);
+                            slot.prompt_clear(true);
 
-                        // there is no common part left
-                        slot.n_prompt_tokens_cache = 0;
+                            // there is no common part left
+                            slot.n_prompt_tokens_cache = 0;
+                        }
                     }
+                    slot.checkpoint_restored = false;
 
                     // check if we should process the image
                     if (slot.prompt.n_tokens() < slot.task->n_tokens() && input_tokens[slot.prompt.n_tokens()] == LLAMA_TOKEN_NULL) {
