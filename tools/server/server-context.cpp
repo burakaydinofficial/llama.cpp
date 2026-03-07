@@ -2542,6 +2542,8 @@ private:
                     if (finish) {
                         SLT_INF(slot, "prompt processing done, n_tokens = %d, batch.n_tokens = %d\n", slot.prompt.n_tokens(), batch.n_tokens);
                     } else {
+                        SLT_INF(slot, "DEBUG checkpoint: do_checkpoint=%d, checkpoint_every_nt=%d, n_checkpoints=%d, n_tokens=%d\n",
+                                (int) do_checkpoint, params_base.checkpoint_every_nt, (int) slot.prompt.checkpoints.size(), slot.prompt.n_tokens());
                         // only do non-end checkpoints if the "checkpoint every n tokens" option is set
                         do_checkpoint = do_checkpoint && params_base.checkpoint_every_nt > 0;
                         if (do_checkpoint) {
