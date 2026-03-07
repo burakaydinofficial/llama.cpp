@@ -2434,7 +2434,7 @@ private:
                         if (slot.checkpoint_restored) {
                             // checkpoint was just restored - the memory state is already correct
                             // seq_rm fails for recurrent/hybrid models but the restored state is valid
-                            SLT_INF(slot, "seq_rm failed after checkpoint restore (expected for recurrent models) - continuing with restored state\n");
+                            SLT_INF(slot, "seq_rm failed after checkpoint restore (expected for recurrent models) - continuing with restored state%s\n", "");
                         } else {
                             SLT_WRN(slot, "failed to truncate tokens with position >= %d - clearing the memory\n", p0);
 
