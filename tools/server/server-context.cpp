@@ -2542,20 +2542,6 @@ private:
                     if (finish) {
                         SLT_INF(slot, "prompt processing done, n_tokens = %d, batch.n_tokens = %d\n", slot.prompt.n_tokens(), batch.n_tokens);
                     } else {
-                        SLT_INF(slot, "DEBUG checkpoint: do_checkpoint=%d, checkpoint_every_nt=%d, n_checkpoints=%d, n_tokens=%d\n",
-                                (int) do_checkpoint, params_base.checkpoint_every_nt, (int) slot.prompt.checkpoints.size(), slot.prompt.n_tokens());
-                        // only do non-end checkpoints if the "checkpoint every n tokens" option is set
-                        do_checkpoint = do_checkpoint && params_base.checkpoint_every_nt > 0;
-                        if (do_checkpoint) {
-                            llama_pos last_checkpoint = 0;
-                            if (!slot.prompt.checkpoints.empty()) {
-                                last_checkpoint = slot.prompt.checkpoints.back().n_tokens;
-                            }
-                            do_checkpoint = do_checkpoint && slot.prompt.n_tokens() - batch.n_tokens - last_checkpoint >= params_base.checkpoint_every_nt;
-                            if (do_checkpoint) {
-                                SLT_INF(slot, "%d tokens since last checkpoint at %d, creating new checkpoint during processing at position %d\n", params_base.checkpoint_every_nt, last_checkpoint, slot.prompt.n_tokens());
-                            }
-                        }
                         SLT_INF(slot, "prompt processing progress, n_tokens = %d, batch.n_tokens = %d, progress = %f\n", slot.prompt.n_tokens(), batch.n_tokens, (float) slot.prompt.n_tokens() / slot.task->n_tokens());
                     }
 
