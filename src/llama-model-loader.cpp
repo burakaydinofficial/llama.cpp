@@ -1261,7 +1261,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         ggml_set_name(&t_meta, tn.str().c_str());
 
         ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
-        GGML_ASSERT(buft != nullptr);
+        if (buft == nullptr) {
+            // buft_for_tensor returns null for tensors this architecture does not
+            // use (info.op == GGML_OP_NONE) and for skipped ones. The file-backed
+            // path below drops those and carries on; asserting here made the
+            // metadata-only path (llama_model_init_from_user) unusable for any
+            // model whose GGUF carries extra tensors.
+            return nullptr;
+        }
         ggml_context * ctx = ctx_for_buft(buft);
         ggml_tensor * ret = ggml_dup_tensor(ctx, &t_meta);
         ggml_set_name(ret, tn.str().c_str());
@@ -1320,6 +1327,12 @@ struct ggml_tensor * llama_model_loader::create_tensor(
 }
 
 void llama_model_loader::done_getting_tensors(bool partial) const {
+    // n_tensors comes from weights_map, which is only populated when loading from
+    // files. In the metadata-only path (llama_model_init_from_user) it is empty, so
+    // both counts below would fire on a model that built perfectly well.
+    if (files.empty()) {
+        return;
+    }
     if (n_created > n_tensors) {
         throw std::runtime_error(format("%s: too many tensors created; expected %d, got %d", __func__, n_tensors, n_created));
     }
