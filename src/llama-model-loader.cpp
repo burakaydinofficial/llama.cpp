@@ -1234,6 +1234,17 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             type = gguf_get_tensor_type(metadata, tid);
         }
 
+        // An OPTIONAL tensor that is not in the metadata is simply absent, exactly
+        // as it would be on the file-backed path (where it is missing from
+        // weights_map and create_tensor returns null). Without this check the
+        // metadata path invents it at the defaulted F32 above: for a fused
+        // blk.N.ffn_gate_up_exps.weight -- which exists only after load-time fusion
+        // and is never in any GGUF -- that means asking for an F32-sized allocation
+        // of a fused expert tensor, and the model fails to load.
+        if (tid == -1 && (flags & TENSOR_NOT_REQUIRED)) {
+            return nullptr;
+        }
+
         // for tensors that are not required some of the dimensions can be invalid:
         if (flags & TENSOR_NOT_REQUIRED) {
             for (size_t dim = 0; dim < ne.size(); dim++) {
