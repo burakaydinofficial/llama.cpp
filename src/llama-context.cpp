@@ -2332,6 +2332,12 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         model.arch == LLM_ARCH_MINIMAX_M3 ||
         model.arch == LLM_ARCH_HY_V4) {
         res = std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
+        // MSA reserve graphs also scale with KV STREAMS (non-unified cache:
+        // one stream per sequence): minimax-m3 at n_seq_max >= 16 exhausted
+        // the token/tensor-only budget above at context creation
+        // (GGML_ASSERT(obj_new), ggml.c). Headroom per stream, cheap in
+        // metadata (~1 MB per 2048 nodes).
+        res += 2048u * cparams.n_seq_max;
     } else if (model.arch == LLM_ARCH_DFLASH && model.hparams.dflash_selector_rank > 0) {
         // DFlash2's convolutions and selector are shape work rather than matmuls,
         // so they cost ~8.6 nodes per tensor against ~5.9 for a plain DFlash draft
