@@ -2296,8 +2296,7 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
     if (model.arch == LLM_ARCH_KIMI_K3) {
         // the n_tokens*40 budget below is exhausted at ubatch 3840
         res = std::max<uint32_t>(n_tokens * 160, 64u * model.n_tensors());
-    }
-    if (model.arch == LLM_ARCH_QWEN3NEXT ||
+    } else if (model.arch == LLM_ARCH_QWEN3NEXT ||
         model.arch == LLM_ARCH_KIMI_LINEAR ||
         model.arch == LLM_ARCH_QWEN35 ||
         model.arch == LLM_ARCH_QWEN35MOE ||
@@ -2306,6 +2305,12 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         model.arch == LLM_ARCH_NANBEIGE ||
         model.arch == LLM_ARCH_MINIMAX_M3) {
         res = std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
+        // MSA reserve graphs also scale with KV STREAMS (non-unified cache:
+        // one stream per sequence): minimax-m3 at n_seq_max >= 16 exhausted
+        // the token/tensor-only budget above at context creation
+        // (GGML_ASSERT(obj_new), ggml.c). Headroom per stream, cheap in
+        // metadata (~1 MB per 2048 nodes).
+        res += 2048u * cparams.n_seq_max;
     } else {
         res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
         for (const auto & lora : model.loras) {
