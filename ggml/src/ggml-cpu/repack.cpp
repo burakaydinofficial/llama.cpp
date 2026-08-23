@@ -17,6 +17,7 @@
 #include <cstdio>  // for GGML_ASSERT
 
 #include "repack.h"
+#include <cstdlib>
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Woverlength-strings"
@@ -4525,6 +4526,25 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
 
 }  // namespace ggml::cpu::repack
 
+// lazydog opt-in: buffer types whose owner repacks the bytes itself. Checked
+// alongside the built-in repack buffer type in the identity tests below.
+static std::vector<ggml_backend_buffer_type_t> & ggml_repack_accepted_bufts() {
+    static std::vector<ggml_backend_buffer_type_t> v;
+    return v;
+}
+static bool ggml_repack_buft_ok(ggml_backend_buffer_type_t b) {
+    // lazydog diagnostic: GGML_NO_REPACK=1 disables the interleaved kernels
+    // entirely, so the contribution of repack to a measurement can be isolated.
+    static const bool disabled = [] {
+        const char * v = getenv("GGML_NO_REPACK");
+        return v && v[0] == '1';
+    }();
+    if (disabled) return false;
+    if (b == ggml_backend_cpu_repack_buffer_type()) return true;
+    for (auto * x : ggml_repack_accepted_bufts()) if (x == b) return true;
+    return false;
+}
+
 static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(const struct ggml_tensor * cur) {
     // instance for Q4
     static const ggml::cpu::repack::tensor_traits<block_q4_0, 4, 4, GGML_TYPE_Q8_0> q4_0_4x4_q8_0;
@@ -4775,7 +4795,7 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
         if (    op->op == GGML_OP_MUL_MAT &&
                 op->src[0]->buffer &&
                 (ggml_n_dims(op->src[0]) == 2) &&
-                op->src[0]->buffer->buft == ggml_backend_cpu_repack_buffer_type() &&
+                ggml_repack_buft_ok(op->src[0]->buffer->buft) &&
                 ggml_repack_get_optimal_repack_type(op->src[0])
                 ) {
             if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
@@ -4791,7 +4811,7 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
         } else if (op->op == GGML_OP_MUL_MAT_ID
                 && op->src[0]->buffer
                 && (ggml_n_dims(op->src[0]) == 3)
-                && op->src[0]->buffer->buft == ggml_backend_cpu_repack_buffer_type()
+                && ggml_repack_buft_ok(op->src[0]->buffer->buft)
                 && ggml_repack_get_optimal_repack_type(op->src[0])
                 ) {
             if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
@@ -4809,7 +4829,7 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
 
     ggml::cpu::tensor_traits * get_tensor_traits(const struct ggml_tensor * op) override {
         if (op->op == GGML_OP_MUL_MAT || op->op == GGML_OP_MUL_MAT_ID) {
-            if (op->src[0]->buffer && op->src[0]->buffer->buft == ggml_backend_cpu_repack_buffer_type()) {
+            if (op->src[0]->buffer && ggml_repack_buft_ok(op->src[0]->buffer->buft)) {
                 return (ggml::cpu::tensor_traits *) op->src[0]->extra;
             }
         }
@@ -4833,4 +4853,52 @@ ggml_backend_buffer_type_t ggml_backend_cpu_repack_buffer_type(void) {
     };
 
     return &ggml_backend_cpu_buffer_type_repack;
+}
+
+// ---------------------------------------------------------------------------
+// lazydog opt-in (see repack.h). A streaming engine owns its own buffer type
+// and repoints tensor->data per node, so it can never satisfy the pointer
+// identity test above. These let it repack the bytes itself and declare the
+// buffer acceptable, which is the only way such an engine can reach these
+// kernels at all.
+// ---------------------------------------------------------------------------
+
+extern "C" bool ggml_cpu_repack_data_in_place(const struct ggml_tensor * t,
+                                              void * data, size_t size) {
+    if (!t || !data) {
+        return false;
+    }
+    const ggml::cpu::tensor_traits * traits = ggml_repack_get_optimal_repack_type(t);
+    if (!traits) {
+        return false;
+    }
+    // repack() reads a SOURCE buffer and writes into t->data, so calling it
+    // with data == t->data would alias. Stage the raw bytes, then repack from
+    // the stage back over the original region. Caller must have pointed
+    // t->data at `data` already.
+    if (t->data != data || size != ggml_nbytes(t)) {
+        return false;
+    }
+    std::vector<uint8_t> stage((const uint8_t *) data, (const uint8_t *) data + size);
+    auto * rt = (ggml::cpu::repack::tensor_traits_base *) traits;
+    return rt->repack(const_cast<struct ggml_tensor *>(t), stage.data(), size) == 0;
+}
+
+extern "C" void ggml_cpu_repack_accept_buft(ggml_backend_buffer_type_t buft) {
+    if (!buft) {
+        return;
+    }
+    for (auto * x : ggml_repack_accepted_bufts()) {
+        if (x == buft) {
+            return;
+        }
+    }
+    ggml_repack_accepted_bufts().push_back(buft);
+}
+
+extern "C" void * ggml_cpu_repack_traits_for(const struct ggml_tensor * t) {
+    if (!t) {
+        return nullptr;
+    }
+    return (void *) const_cast<ggml::cpu::tensor_traits *>(ggml_repack_get_optimal_repack_type(t));
 }
