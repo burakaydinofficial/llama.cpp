@@ -10,6 +10,27 @@
 
 ggml_backend_buffer_type_t ggml_backend_cpu_repack_buffer_type(void);
 
+// lazydog: streaming engines allocate weights in their own buffer type and
+// repoint tensor->data per node, so they can never satisfy the pointer-identity
+// test in the repack extra_buffer_type -- and therefore never reach these
+// kernels, costing ~3x on CPU. These two entry points let such a buffer opt in:
+// repack the bytes yourself on materialisation, then declare the buffer type
+// acceptable. Both are no-ops for anyone who does not call them.
+extern "C" {
+// Repacks tensor data IN PLACE into the interleaved layout the optimised
+// kernels expect. Returns false (leaving data untouched) when this tensor type
+// or shape has no optimal repack, which the caller must treat as "leave raw".
+GGML_BACKEND_API bool ggml_cpu_repack_data_in_place(const struct ggml_tensor * t,
+                                                   void * data, size_t size);
+// Declares buft acceptable to the repack kernels. The caller guarantees the
+// data behind matching tensors is already repacked.
+GGML_BACKEND_API void ggml_cpu_repack_accept_buft(ggml_backend_buffer_type_t buft);
+// Returns the traits the kernels look for in tensor->extra, or null when this
+// tensor has no optimal repack. A buffer that repacks must set extra itself;
+// the kernel dispatch reads it and silently declines when it is null.
+GGML_BACKEND_API void * ggml_cpu_repack_traits_for(const struct ggml_tensor * t);
+}
+
 template <int K> constexpr int QK_0() {
     if constexpr (K == 4) {
         return QK4_0;
