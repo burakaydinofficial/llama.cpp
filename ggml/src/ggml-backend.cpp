@@ -772,6 +772,10 @@ static bool ggml_is_view_op(enum ggml_op op) {
 #define GGML_SCHED_MAX_COPIES 4
 #endif
 
+// blocks double in size, so 32 blocks are enough for any graph
+#define GGML_SCHED_MAX_CTX_BLOCKS 32
+#define GGML_SCHED_CTX_FIRST_OBJECTS 1024
+
 struct ggml_backend_sched_split {
     int backend_id;
     int i_start;
@@ -821,13 +825,16 @@ struct ggml_backend_sched {
     int n_graph_inputs;
     int graph_inputs_capacity;
 
-    struct ggml_context * ctx;
+    // tensors made by split_graph, in blocks allocated on demand (a worst-case buffer is ~20 KB per graph node, mostly never used)
+    struct ggml_context * ctx_blocks[GGML_SCHED_MAX_CTX_BLOCKS];
+    int n_ctx_blocks;
+    size_t ctx_first_size;
 
     ggml_backend_sched_eval_callback callback_eval;
     void * callback_eval_user_data;
 
-    char * context_buffer;
-    size_t context_buffer_size;
+    // capacity of node/leaf_backend_ids and their prev_ copies, grown with sched->graph
+    int ids_capacity;
 
     bool op_offload;
 
@@ -1055,6 +1062,39 @@ static bool ggml_backend_sched_buffer_supported(ggml_backend_sched_t sched, stru
     return buft != NULL && ggml_backend_supports_buft(sched->backends[backend_id], buft);
 }
 
+static void ggml_backend_sched_free_ctx_blocks(ggml_backend_sched_t sched) {
+    for (int i = 0; i < sched->n_ctx_blocks; i++) {
+        ggml_free(sched->ctx_blocks[i]);
+        sched->ctx_blocks[i] = NULL;
+    }
+    sched->n_ctx_blocks = 0;
+}
+
+static struct ggml_context * ggml_backend_sched_new_ctx_block(ggml_backend_sched_t sched, size_t mem_size) {
+    GGML_ASSERT(sched->n_ctx_blocks < GGML_SCHED_MAX_CTX_BLOCKS);
+    struct ggml_init_params params = {
+        /* .mem_size   = */ mem_size,
+        /* .mem_buffer = */ NULL,
+        /* .no_alloc   = */ true
+    };
+    struct ggml_context * ctx = ggml_init(params);
+    if (ctx == NULL) {
+        GGML_ABORT("%s: failed to initialize context\n", __func__);
+    }
+    sched->ctx_blocks[sched->n_ctx_blocks++] = ctx;
+    return ctx;
+}
+
+// context for the next split_graph tensor: the current block, or a new block of twice its size when full
+static struct ggml_context * ggml_backend_sched_ctx(ggml_backend_sched_t sched) {
+    struct ggml_context * ctx = sched->ctx_blocks[sched->n_ctx_blocks - 1];
+    const size_t size = ggml_get_mem_size(ctx);
+    if (size - ggml_used_mem(ctx) < ggml_tensor_overhead()) {
+        ctx = ggml_backend_sched_new_ctx_block(sched, size * 2);
+    }
+    return ctx;
+}
+
 static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, struct ggml_tensor * node, int cur_backend_id, int * node_backend_id) {
     if (ggml_backend_supports_op(sched->backends[cur_backend_id], node)) {
         *node_backend_id = cur_backend_id;
@@ -1069,18 +1109,8 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
     sched->n_graph_inputs = 0;
     sched->is_reset = false;
 
-    struct ggml_init_params params = {
-        /* .mem_size =   */ sched->context_buffer_size,
-        /* .mem_buffer = */ sched->context_buffer,
-        /* .no_alloc =   */ true
-    };
-
-    ggml_free(sched->ctx);
-
-    sched->ctx = ggml_init(params);
-    if (sched->ctx == NULL) {
-        GGML_ABORT("%s: failed to initialize context\n", __func__);
-    }
+    ggml_backend_sched_free_ctx_blocks(sched);
+    ggml_backend_sched_new_ctx_block(sched, sched->ctx_first_size);
 
     graph->uid = ggml_graph_next_uid();
 
@@ -1380,7 +1410,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                             if (c == sched->cur_copy) {
                                 tensor_copy = src; // use the original tensor as the current copy
                             } else {
-                                tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
+                                tensor_copy = ggml_dup_tensor_layout(ggml_backend_sched_ctx(sched), src);
                                 ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
                             }
                             ggml_set_input(tensor_copy);
@@ -1401,7 +1431,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                     if (tensor_id_copy(src_id, cur_backend_id, 0) == NULL) {
                         ggml_backend_t backend = sched->backends[cur_backend_id];
                         for (int c = 0; c < sched->n_copies; c++) {
-                            struct ggml_tensor * tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
+                            struct ggml_tensor * tensor_copy = ggml_dup_tensor_layout(ggml_backend_sched_ctx(sched), src);
                             ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
                             if (sched->n_copies > 1) {
                                 ggml_set_input(tensor_copy);
@@ -1485,6 +1515,17 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         GGML_ASSERT(sched->graph.nodes != NULL);
         GGML_ASSERT(sched->graph.leafs != NULL);
     }
+    // backend ids are indexed like graph_copy, so they grow with it (new entries are zero, as with calloc)
+    if (sched->ids_capacity < graph_size) {
+        int ** ids[4] = { &sched->node_backend_ids, &sched->leaf_backend_ids,
+                          &sched->prev_node_backend_ids, &sched->prev_leaf_backend_ids };
+        for (int k = 0; k < 4; k++) {
+            *ids[k] = (int *) realloc(*ids[k], graph_size * sizeof(int));
+            GGML_ASSERT(*ids[k] != NULL);
+            memset(*ids[k] + sched->ids_capacity, 0, (graph_size - sched->ids_capacity) * sizeof(int));
+        }
+        sched->ids_capacity = graph_size;
+    }
     sched->graph.n_nodes = 0;
     sched->graph.n_leafs = 0;
 
@@ -1504,7 +1545,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             struct ggml_tensor * input_cpy = tensor_id_copy(input_id, split->backend_id, sched->cur_copy);
 
             // add a dependency to the input source so that it is not freed before the copy is done
-            struct ggml_tensor * input_dep = ggml_view_tensor(sched->ctx, input);
+            struct ggml_tensor * input_dep = ggml_view_tensor(ggml_backend_sched_ctx(sched), input);
             input_dep->src[0] = input;
             sched->node_backend_ids[graph_copy->n_nodes] = sched->hv_tensor_backend_ids[input_id];
             graph_copy->nodes[graph_copy->n_nodes++] = input_dep;
@@ -1528,7 +1569,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             if (it != alloc_deps.end()) {
                 const std::vector<ggml_tensor *> & keep = it->second;
                 for (size_t k = 0; k < keep.size(); k += GGML_MAX_SRC) {
-                    struct ggml_tensor * dep = ggml_view_tensor(sched->ctx, keep[k]);
+                    struct ggml_tensor * dep = ggml_view_tensor(ggml_backend_sched_ctx(sched), keep[k]);
                     for (size_t s = 0; s < GGML_MAX_SRC && k + s < keep.size(); s++) {
                         dep->src[s] = keep[k + s];
                     }
@@ -1586,6 +1627,13 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
     for (int i = 0; i < sched->n_splits; ++i) {
         sched->splits[i].graph.uid = ggml_graph_next_uid();
     }
+
+    // size the next first block to fit this graph, so steady state uses one block
+    size_t ctx_used = 0;
+    for (int i = 0; i < sched->n_ctx_blocks; i++) {
+        ctx_used += ggml_used_mem(sched->ctx_blocks[i]);
+    }
+    sched->ctx_first_size = std::max(sched->ctx_first_size, ctx_used);
 }
 
 static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
@@ -1874,18 +1922,17 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->hv_tensor_backend_ids = (int *) malloc(sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
     sched->hv_tensor_copies      = (ggml_tensor **) malloc(sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
 
-    const size_t ggml_sched_max_splits = graph_size; // at most there is one split for each node in the graph
-    const size_t nodes_size = graph_size + ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2;
-    sched->node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->node_backend_ids[0]));
-    sched->leaf_backend_ids = (int *) calloc(nodes_size, sizeof(sched->leaf_backend_ids[0]));
-    sched->prev_node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->prev_node_backend_ids[0]));
-    sched->prev_leaf_backend_ids = (int *) calloc(nodes_size, sizeof(sched->prev_leaf_backend_ids[0]));
+    // sized for the graph; split_graph grows them if split inputs make the graph copy larger
+    sched->ids_capacity = (int) graph_size;
+    sched->node_backend_ids = (int *) calloc(graph_size, sizeof(sched->node_backend_ids[0]));
+    sched->leaf_backend_ids = (int *) calloc(graph_size, sizeof(sched->leaf_backend_ids[0]));
+    sched->prev_node_backend_ids = (int *) calloc(graph_size, sizeof(sched->prev_node_backend_ids[0]));
+    sched->prev_leaf_backend_ids = (int *) calloc(graph_size, sizeof(sched->prev_leaf_backend_ids[0]));
 
     sched->debug_graph_size = 0;
     sched->debug_prev_graph_size = 0;
 
-    sched->context_buffer_size = ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2*sizeof(struct ggml_tensor) + ggml_graph_overhead_custom(graph_size, false);
-    sched->context_buffer = (char *) malloc(sched->context_buffer_size);
+    sched->ctx_first_size = GGML_SCHED_CTX_FIRST_OBJECTS * ggml_tensor_overhead();
 
     const int initial_splits_capacity = 16;
     sched->splits = (ggml_backend_sched_split *) calloc(initial_splits_capacity, sizeof(sched->splits[0]));
@@ -1924,7 +1971,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
         }
     }
     ggml_gallocr_free(sched->galloc);
-    ggml_free(sched->ctx);
+    ggml_backend_sched_free_ctx_blocks(sched);
     ggml_hash_set_free(&sched->hash_set);
     for (int i = 0; i < sched->splits_capacity; i++) {
         free(sched->splits[i].inputs);
@@ -1937,7 +1984,6 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     free(sched->leaf_backend_ids);
     free(sched->prev_node_backend_ids);
     free(sched->prev_leaf_backend_ids);
-    free(sched->context_buffer);
     free(sched->graph.nodes);
     free(sched->graph.leafs);
     free(sched);
