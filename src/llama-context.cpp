@@ -1428,6 +1428,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         ggml_backend_sched_reset(sched.get());
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        ggml_backend_sched_set_copy_callback(sched.get(), cparams.cb_copy, cparams.cb_copy_user_data);
 
         //const auto t_start_us = ggml_time_us();
 
@@ -3979,6 +3980,15 @@ int32_t llama_n_threads_batch(llama_context * ctx) {
 
 void llama_set_abort_callback(llama_context * ctx, bool (*abort_callback)(void * data), void * abort_callback_data) {
     ctx->set_abort_callback(abort_callback, abort_callback_data);
+}
+
+void llama_context::set_copy_callback(ggml_backend_sched_copy_callback cb, void * user_data) {
+    cparams.cb_copy = cb;
+    cparams.cb_copy_user_data = user_data;
+}
+
+void llama_set_copy_callback(llama_context * ctx, ggml_backend_sched_copy_callback cb, void * user_data) {
+    ctx->set_copy_callback(cb, user_data);
 }
 
 void llama_set_embeddings(llama_context * ctx, bool embeddings) {
