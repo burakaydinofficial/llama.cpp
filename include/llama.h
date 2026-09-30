@@ -408,6 +408,12 @@ extern "C" {
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
+
+        // with the KV cache in host memory (offload_kqv false): keep work that scales with it --
+        // attention and indexer scores over every cached key -- on the host. Bounds device
+        // memory by the batch instead of the context, at the cost of computing that work on the
+        // CPU; for callers that must fit a VRAM budget at long contexts
+        bool kv_home;
     };
 
     struct llama_model_tensor_override {
