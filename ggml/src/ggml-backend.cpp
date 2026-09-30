@@ -835,6 +835,8 @@ struct ggml_backend_sched {
     ggml_backend_sched_copy_callback callback_copy;
     void * callback_copy_user_data;
 
+    bool kv_home;   // ggml_backend_sched_set_kv_home
+
     // capacity of node/leaf_backend_ids and their prev_ copies, grown with sched->graph
     int ids_capacity;
 
@@ -956,6 +958,7 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
         SET_CAUSE(tensor, "1.inp");
         return cur_backend_id;
     }
+
 
     // operations with weights are preferably run on the same backend as the weights
     // TODO: there are exceptions (see below) - not an ideal solution
@@ -1116,6 +1119,46 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
     graph->uid = ggml_graph_next_uid();
 
+    // pass 0 (when enabled, ggml_backend_sched_set_kv_home): work that scales with a KV cache
+    // kept in host memory stays with the cache.
+    // A KV cache holds one row per context position, so what is computed from it -- attention
+    // scores, a sparse-attention indexer's scores against every cached key, norms and ropes of
+    // all cached keys -- is sized by the context, and reserved for a FULL one. Placed on a GPU
+    // (after the query, or after a small weight such as a norm scale), it made device memory
+    // grow with the very context length the cache was kept in RAM for. An op is cache-sized
+    // when it reads the cache, or reads a cache-sized tensor and is at least as large as it;
+    // a result smaller than its cache-sized input (attention's output, top-k indices) ends the
+    // chain and is free to go anywhere.
+    std::vector<int> kv_home;   // backend of the cache, if cache-sized (only when enabled)
+    if (sched->kv_home) {
+        kv_home.assign(sched->hash_set.size, -1);
+    }
+    for (int i = 0; sched->kv_home && i < graph->n_nodes; i++) {
+        struct ggml_tensor * node = graph->nodes[i];
+        for (int j = 0; j < GGML_MAX_SRC; j++) {
+            struct ggml_tensor * src = node->src[j];
+            if (src == NULL) {
+                continue;
+            }
+            struct ggml_tensor * base = src->view_src ? src->view_src : src;
+            int home = -1;
+            if (base->buffer != NULL && base->buffer->usage == GGML_BACKEND_BUFFER_USAGE_KV &&
+                ggml_backend_buffer_is_host(base->buffer)) {
+                home = ggml_backend_sched_backend_from_buffer(sched, base, node);
+            } else {
+                const int h = kv_home[hash_id(src)] != -1 ? kv_home[hash_id(src)]
+                            : src->view_src ? kv_home[hash_id(src->view_src)] : -1;
+                if (h != -1 && ggml_nelements(node) >= ggml_nelements(src)) {
+                    home = h;
+                }
+            }
+            if (home != -1) {
+                kv_home[hash_id(node)] = home;
+                break;
+            }
+        }
+    }
+
     // pass 1: assign backends to ops with pre-allocated inputs
     for (int i = 0; i < graph->n_leafs; i++) {
         struct ggml_tensor * leaf = graph->leafs[i];
@@ -1130,6 +1173,13 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         struct ggml_tensor * node = graph->nodes[i];
         int * node_backend_id = &tensor_backend_id(node);
         // do not overwrite user assignments
+        const int home = sched->kv_home ? kv_home[hash_id(node)] : -1;
+        if (*node_backend_id == -1 && home != -1 && !node->buffer && !node->view_src &&
+            ggml_backend_supports_op(sched->backends[home], node)) {
+            *node_backend_id = home;   // cache-sized: pass 0
+            SET_CAUSE(node, "0.kv");
+            continue;
+        }
         if (*node_backend_id == -1) {
             *node_backend_id = ggml_backend_sched_backend_id_from_cur(sched, node);
 
@@ -2134,6 +2184,11 @@ void ggml_backend_sched_set_copy_callback(ggml_backend_sched_t sched, ggml_backe
     GGML_ASSERT(sched);
     sched->callback_copy = callback;
     sched->callback_copy_user_data = user_data;
+}
+
+void ggml_backend_sched_set_kv_home(ggml_backend_sched_t sched, bool kv_home) {
+    GGML_ASSERT(sched);
+    sched->kv_home = kv_home;
 }
 
 int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {

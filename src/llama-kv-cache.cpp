@@ -283,6 +283,10 @@ llama_kv_cache::llama_kv_cache(
             }
         } else {
             buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft); // real buffer
+            if (buf) {
+                // lets the scheduler keep work derived from a host-resident cache on the CPU
+                ggml_backend_buffer_set_usage(buf, GGML_BACKEND_BUFFER_USAGE_KV);
+            }
         }
         if (!buf) {
             throw std::runtime_error("failed to allocate buffer for kv cache");
