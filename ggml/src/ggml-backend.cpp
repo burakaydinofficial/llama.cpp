@@ -832,6 +832,8 @@ struct ggml_backend_sched {
 
     ggml_backend_sched_eval_callback callback_eval;
     void * callback_eval_user_data;
+    ggml_backend_sched_copy_callback callback_copy;
+    void * callback_copy_user_data;
 
     // capacity of node/leaf_backend_ids and their prev_ copies, grown with sched->graph
     int ids_capacity;
@@ -1735,6 +1737,26 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     ggml_backend_synchronize(split_backend);
                 }
 
+                // The copy callback brackets the read of a host-buffer input (see its typedef): the
+                // "after" call runs once the copy has completed, on every path out of this scope.
+                struct copy_bracket {
+                    ggml_backend_sched_t sched;
+                    ggml_tensor *        t;
+                    ggml_backend_t       dst;
+                    bool                 on;
+                    ~copy_bracket() {
+                        if (on) {
+                            ggml_backend_synchronize(dst);
+                            sched->callback_copy(t, false, sched->callback_copy_user_data);
+                        }
+                    }
+                } bracket{ sched, input, split_backend,
+                           sched->callback_copy != nullptr && input->buffer != nullptr &&
+                               ggml_backend_buffer_is_host(input->buffer) };
+                if (bracket.on) {
+                    sched->callback_copy(input, true, sched->callback_copy_user_data);
+                }
+
                 // when offloading MoE weights, we can reduce the amount of data copied by copying only the experts that are used
                 ggml_tensor * node = split->graph.nodes[0];
                 if (split->graph.n_nodes > 0 &&
@@ -2089,6 +2111,12 @@ void ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backe
     GGML_ASSERT(sched);
     sched->callback_eval = callback;
     sched->callback_eval_user_data = user_data;
+}
+
+void ggml_backend_sched_set_copy_callback(ggml_backend_sched_t sched, ggml_backend_sched_copy_callback callback, void * user_data) {
+    GGML_ASSERT(sched);
+    sched->callback_copy = callback;
+    sched->callback_copy_user_data = user_data;
 }
 
 int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {

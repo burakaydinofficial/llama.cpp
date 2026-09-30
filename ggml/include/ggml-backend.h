@@ -315,6 +315,12 @@ extern "C" {
     //
     typedef bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data);
 
+    // Copy callback: called around the scheduler's copy of a split input that lives in a host
+    // buffer -- before == true just before its bytes are read, before == false once the copy has
+    // completed. Lets a caller that pages weights in on demand make them resident for the copy:
+    // the eval callback only runs after a split's inputs have already been copied.
+    typedef void (*ggml_backend_sched_copy_callback)(struct ggml_tensor * t, bool before, void * user_data);
+
     // Initialize a backend scheduler, backends with low index are given priority over backends with high index
     GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
     GGML_API void                 ggml_backend_sched_free(ggml_backend_sched_t sched);
@@ -352,6 +358,7 @@ extern "C" {
 
     // Set a callback to be called for each resulting node during graph compute
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
+    GGML_API void                 ggml_backend_sched_set_copy_callback(ggml_backend_sched_t sched, ggml_backend_sched_copy_callback callback, void * user_data);
 
     //
     // Meta backend

@@ -63,5 +63,9 @@ struct llama_cparams {
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
 
+    // llama_set_copy_callback: brackets the scheduler's copies of host-buffer inputs
+    ggml_backend_sched_copy_callback cb_copy = nullptr;
+    void * cb_copy_user_data = nullptr;
+
     llama_context * ctx_other;
 };
