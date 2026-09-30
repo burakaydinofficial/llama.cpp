@@ -320,8 +320,11 @@ extern "C" {
     // Copy callback: called around the scheduler's copy of a split input that lives in a host
     // buffer -- before == true just before its bytes are read, before == false once the copy has
     // completed. Lets a caller that pages weights in on demand make them resident for the copy:
-    // the eval callback only runs after a split's inputs have already been copied.
-    typedef void (*ggml_backend_sched_copy_callback)(struct ggml_tensor * t, bool before, void * user_data);
+    // the eval callback only runs after a split's inputs have already been copied. `experts`
+    // (before only): for an expert-fused weight feeding MUL_MAT_ID, the ascending expert indices
+    // the copy will read -- only those need to be present; null = the whole tensor.
+    typedef void (*ggml_backend_sched_copy_callback)(struct ggml_tensor * t, const int32_t * experts,
+                                                     int64_t n_experts, bool before, void * user_data);
 
     // Initialize a backend scheduler, backends with low index are given priority over backends with high index
     GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
