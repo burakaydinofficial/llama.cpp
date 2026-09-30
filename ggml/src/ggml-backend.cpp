@@ -1676,25 +1676,32 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     ggml_backend_synchronize(split_backend);
                 }
 
-                // The copy callback brackets the read of a host-buffer input (see its typedef): the
-                // "after" call runs once the copy has completed, on every path out of this scope.
+                // The copy callback brackets the read of a host-buffer input (see its typedef):
+                // begin() just before the bytes are read -- for MoE weights once the used experts
+                // are known -- and the "after" call once the copy has completed, on every path out
+                // of this scope that began.
                 struct copy_bracket {
                     ggml_backend_sched_t sched;
                     ggml_tensor *        t;
                     ggml_backend_t       dst;
                     bool                 on;
+                    bool                 begun = false;
+                    void begin(const int32_t * experts, int64_t n_experts) {
+                        if (on && !begun) {
+                            begun = true;
+                            sched->callback_copy(t, experts, n_experts, true, sched->callback_copy_user_data);
+                        }
+                    }
                     ~copy_bracket() {
-                        if (on) {
+                        if (begun) {
                             ggml_backend_synchronize(dst);
-                            sched->callback_copy(t, false, sched->callback_copy_user_data);
+                            sched->callback_copy(t, nullptr, 0, false, sched->callback_copy_user_data);
                         }
                     }
                 } bracket{ sched, input, split_backend,
                            sched->callback_copy != nullptr && input->buffer != nullptr &&
                                ggml_backend_buffer_is_host(input->buffer) };
-                if (bracket.on) {
-                    sched->callback_copy(input, true, sched->callback_copy_user_data);
-                }
+                std::vector<int32_t> used_list;
 
                 // when offloading MoE weights, we can reduce the amount of data copied by copying only the experts that are used
                 ggml_tensor * node = split->graph.nodes[0];
@@ -1743,6 +1750,15 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                         prev_ids_tensor = ids_tensor;
                     }
 
+                    if (bracket.on) {
+                        for (int32_t e = 0; e < (int32_t) n_expert; ++e) {
+                            if (ggml_bitset_get(used_ids.data(), e)) {
+                                used_list.push_back(e);
+                            }
+                        }
+                        bracket.begin(used_list.data(), (int64_t) used_list.size());
+                    }
+
                     // group consecutive experts and copy them together
                     auto copy_experts = [&](int32_t first_id, int32_t last_id) {
                         const size_t expert_offset = first_id * expert_size;
@@ -1782,6 +1798,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     }
                     copy_experts(first_id, last_id);
                 } else {
+                    bracket.begin(nullptr, 0);   // the whole tensor
                     // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
                     // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
                     if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
