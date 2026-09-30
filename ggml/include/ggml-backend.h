@@ -52,6 +52,9 @@ extern "C" {
         GGML_BACKEND_BUFFER_USAGE_ANY = 0,
         GGML_BACKEND_BUFFER_USAGE_WEIGHTS = 1,
         GGML_BACKEND_BUFFER_USAGE_COMPUTE = 2,
+        // a cache the graph reads and writes across evaluations (llama's KV caches); the
+        // scheduler keeps work derived from it on its device when it lives in host memory
+        GGML_BACKEND_BUFFER_USAGE_KV = 3,
     };
 
     GGML_API const char *                   ggml_backend_buffer_name          (ggml_backend_buffer_t buffer);
@@ -364,6 +367,10 @@ extern "C" {
     // Set a callback to be called for each resulting node during graph compute
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
     GGML_API void                 ggml_backend_sched_set_copy_callback(ggml_backend_sched_t sched, ggml_backend_sched_copy_callback callback, void * user_data);
+    // Keep work that scales with a KV cache in host memory (buffer usage KV) on the host: bounds
+    // device memory by the batch instead of the context, at the cost of computing it on the CPU.
+    // Off by default.
+    GGML_API void                 ggml_backend_sched_set_kv_home(ggml_backend_sched_t sched, bool kv_home);
 
     //
     // Meta backend

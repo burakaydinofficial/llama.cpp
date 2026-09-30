@@ -51,6 +51,7 @@ struct llama_cparams {
     bool no_perf;
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;
+    bool kv_home;   // llama_context_params::kv_home
     bool kv_unified;
     bool pipeline_parallel;
     bool training;           // set by llama_opt_init()
