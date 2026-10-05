@@ -1357,6 +1357,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
         ggml_backend_sched_set_copy_callback(sched.get(), cparams.cb_copy, cparams.cb_copy_user_data);
 
+        // decode (one token per sequence) has no batch to offload; backends count rows, and per-head tensors have many rows
+        ggml_backend_sched_set_op_offload(sched.get(), cparams.op_offload && ubatch.n_seqs_unq < ubatch.n_tokens);
+
         //const auto t_start_us = ggml_time_us();
 
         gf = model.build_graph(gparams);

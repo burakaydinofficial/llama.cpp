@@ -2126,6 +2126,11 @@ void ggml_backend_sched_set_kv_home(ggml_backend_sched_t sched, bool kv_home) {
     sched->kv_home = kv_home;
 }
 
+void ggml_backend_sched_set_op_offload(ggml_backend_sched_t sched, bool op_offload) {
+    GGML_ASSERT(sched);
+    sched->op_offload = op_offload;
+}
+
 int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     return sched->n_splits;
