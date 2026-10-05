@@ -371,6 +371,8 @@ extern "C" {
     // device memory by the batch instead of the context, at the cost of computing it on the CPU.
     // Off by default.
     GGML_API void                 ggml_backend_sched_set_kv_home(ggml_backend_sched_t sched, bool kv_home);
+    // Allow or forbid op offload (see ggml_backend_sched_new); applies from the next graph split
+    GGML_API void                 ggml_backend_sched_set_op_offload(ggml_backend_sched_t sched, bool op_offload);
 
     //
     // Meta backend
